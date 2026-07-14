@@ -4,7 +4,7 @@
   "type": "module",
   "dependencies": {
     "express": "^4.19.0",
-    "pg": "^8.11.0",
+    "better-sqlite3": "^11.0.0",
     "json2csv": "^6.0.0",
     "pdfkit": "^0.15.0"
   }
