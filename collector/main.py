@@ -21,8 +21,8 @@ from fastapi import BackgroundTasks, FastAPI, UploadFile
 from pydantic import BaseModel
 
 app = FastAPI(title="OmniSeed Collector")
-
 DB_PATH = os.environ.get("OMNISEED_DB_PATH", "omniseed.db")
+
 SCRATCH_DIR = "/tmp/omniseed"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB safety cap
 
