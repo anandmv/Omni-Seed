@@ -7,26 +7,41 @@ a data-fetch endpoint rather than pushing).
 
 Each source gets its own small poller function. Adding a new vendor means
 writing one new poller and registering it below — no changes to the core
-pipeline required.
+pipeline required. Jobs are written straight into the SQLite `jobs` table
+(same as collector/main.py), so there's no separate broker to run.
 
-Run with: python poller.py
+Run with: uv run collector/poller.py
 """
 
 import asyncio
 import json
+import os
 import time
 import uuid
 
+import aiosqlite
 import httpx
-import redis
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-r = redis.Redis()
-STREAM = "omniseed:jobs"
+DB_PATH = os.environ.get("OMNISEED_DB_PATH", "omniseed.db")
 
 
-def enqueue(envelope: dict) -> None:
-    r.xadd(STREAM, {"data": json.dumps(envelope)})
+async def enqueue(envelope: dict) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO jobs (job_id, source_id, source_type, status, envelope_json, received_at)
+            VALUES (?, ?, ?, 'received', ?, ?)
+            """,
+            (
+                envelope["job_id"],
+                envelope["source_id"],
+                envelope["source_type"],
+                json.dumps(envelope),
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(envelope["received_at"])),
+            ),
+        )
+        await db.commit()
 
 
 async def poll_wearable_api(source_id: str, endpoint: str, api_token: str) -> None:
@@ -43,7 +58,7 @@ async def poll_wearable_api(source_id: str, endpoint: str, api_token: str) -> No
             "received_at": time.time(),
             "raw_payload": resp.json(),
         }
-        enqueue(envelope)
+        await enqueue(envelope)
 
 
 async def poll_iot_platform(source_id: str, endpoint: str, api_key: str) -> None:
@@ -59,7 +74,7 @@ async def poll_iot_platform(source_id: str, endpoint: str, api_key: str) -> None
             "received_at": time.time(),
             "raw_payload": resp.json(),
         }
-        enqueue(envelope)
+        await enqueue(envelope)
 
 
 def build_scheduler() -> AsyncIOScheduler:
