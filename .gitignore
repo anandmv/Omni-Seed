@@ -218,6 +218,12 @@ out/
 .idea/
 .vscode/
 *.env
+*.lock
+
+*.pids
+
+# SQLite database files
+omniseed.db
 
 # Static React build output
 build/

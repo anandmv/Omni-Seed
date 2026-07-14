@@ -5,6 +5,8 @@ uploads), analyses it with a locally hosted LLM (LM Studio + Phi), and
 stores only generated metadata/summaries long-term in a local SQLite
 database.
 
+![OmniSeed architecture](assets/omniseed_architecture.svg)
+
 See `PLAN.md` for the full architecture writeup.
 
 ## Layout
@@ -42,10 +44,33 @@ omniseed/
   manages the virtual environment automatically based on `pyproject.toml`,
   no manual `venv` activation needed.
 
-## Running locally (rough order)
+## Running locally (recommended)
+
+Use the included shell script for a local runloop:
+
+```bash
+./run-locally.sh init
+./run-locally.sh start
+```
+
+Commands:
+
+- `./run-locally.sh init`
+  - creates `omniseed.db` from `db/schema.sql` if needed
+  - installs Python dependencies with `uv`
+  - installs Node dependencies for `ui/server`
+- `./run-locally.sh start`
+  - starts the FastAPI collector API on `http://localhost:8000`
+  - starts the collector poller
+  - starts the analyser worker
+  - starts `ui/server/server.js` if present
+- `./run-locally.sh stop`
+  - stops the managed background processes
+
+Manual steps (if you prefer them):
 
 1. Create the SQLite database from the schema:
-   ```
+   ```bash
    sqlite3 omniseed.db < db/schema.sql
    ```
 2. Start Redis locally (still used as the job queue between collector and
@@ -53,20 +78,20 @@ omniseed/
 3. Start LM Studio in server mode with a Phi model loaded (listens on
    `localhost:1234` by default).
 4. Install Python deps and run the collector API:
-   ```
+   ```bash
    uv run uvicorn collector.main:app --reload --port 8000
    ```
 5. Start the polling collectors:
-   ```
-   uv run collector/poller.py
+   ```bash
+   uv run python collector/poller.py
    ```
 6. Start the analyser worker:
-   ```
-   uv run analyser/worker.py
+   ```bash
+   uv run python analyser/worker.py
    ```
 7. Install and start the Node UI server:
-   ```
-   cd ui/server && npm install && node server.js
+   ```bash
+   cd ui/server && yarn install && node server.js
    ```
    (wire up your own `server.js`/Express app importing `routes/export.js`)
 8. Start the React client, using `ExportPanel` in your results view.
