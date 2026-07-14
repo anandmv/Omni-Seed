@@ -9,9 +9,9 @@ step leaves the job unacked and the raw data intact for retry.
 Requires:
   - LM Studio running in server mode on localhost:1234
   - Redis running locally
-  - Postgres reachable via DATABASE_URL
+  - A SQLite file at DB_PATH (created from db/schema.sql)
 
-Run with: python worker.py
+Run with: uv run analyser/worker.py
 """
 
 import asyncio
@@ -19,8 +19,9 @@ import json
 import os
 import shutil
 import time
+import uuid
 
-import asyncpg
+import aiosqlite
 import httpx
 import redis
 from pydantic import BaseModel, ValidationError
@@ -33,9 +34,7 @@ GROUP = "analysers"
 CONSUMER_NAME = "worker-1"
 
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/omniseed")
-
-MAX_RETRIES = 1
+DB_PATH = os.environ.get("OMNISEED_DB_PATH", "omniseed.db")
 
 
 class AnalysisResult(BaseModel):
@@ -78,35 +77,34 @@ async def analyse(envelope: dict) -> AnalysisResult:
         return AnalysisResult.model_validate_json(raw_retry)  # let this raise if it still fails
 
 
-async def persist_and_cleanup(pool: asyncpg.Pool, envelope: dict, result: AnalysisResult) -> None:
+async def persist_and_cleanup(db: aiosqlite.Connection, envelope: dict, result: AnalysisResult) -> None:
     """Single logical operation: write result, mark job complete, delete raw
     data. If any step raises, nothing here is committed/deleted and the
     queue message stays unacked for retry."""
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
-                INSERT INTO analysis_results
-                    (job_id, source_id, source_type, summary, tags, anomaly_flag, prompt_version)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
-                envelope["job_id"],
-                envelope["source_id"],
-                envelope["source_type"],
-                result.summary,
-                result.tags,
-                result.anomaly_flag,
-                PROMPT_VERSION,
-            )
-            await conn.execute(
-                """
-                UPDATE jobs
-                SET status = 'summarized', completed_at = to_timestamp($2)
-                WHERE job_id = $1
-                """,
-                envelope["job_id"],
-                time.time(),
-            )
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    await db.execute(
+        """
+        INSERT INTO analysis_results
+            (id, job_id, source_id, source_type, summary, tags, anomaly_flag, prompt_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            envelope["job_id"],
+            envelope["source_id"],
+            envelope["source_type"],
+            result.summary,
+            json.dumps(result.tags),
+            1 if result.anomaly_flag else 0,
+            PROMPT_VERSION,
+        ),
+    )
+    await db.execute(
+        "UPDATE jobs SET status = 'summarized', completed_at = ? WHERE job_id = ?",
+        (now_iso, envelope["job_id"]),
+    )
+    await db.commit()
 
     # Delete raw data only after the DB write above has committed successfully.
     if envelope["source_type"] == "upload":
@@ -115,20 +113,19 @@ async def persist_and_cleanup(pool: asyncpg.Pool, envelope: dict, result: Analys
             job_dir = os.path.dirname(scratch_path)
             shutil.rmtree(job_dir, ignore_errors=True)
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE jobs SET status = 'raw_deleted' WHERE job_id = $1",
-            envelope["job_id"],
-        )
+    await db.execute(
+        "UPDATE jobs SET status = 'raw_deleted' WHERE job_id = ?",
+        (envelope["job_id"],),
+    )
+    await db.commit()
 
 
-async def log_failure(pool: asyncpg.Pool, job_id: str, error: str) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE jobs SET status = 'failed', error_message = $2 WHERE job_id = $1",
-            job_id,
-            error,
-        )
+async def log_failure(db: aiosqlite.Connection, job_id: str, error: str) -> None:
+    await db.execute(
+        "UPDATE jobs SET status = 'failed', error_message = ? WHERE job_id = ?",
+        (error, job_id),
+    )
+    await db.commit()
 
 
 async def ensure_consumer_group() -> None:
@@ -139,7 +136,7 @@ async def ensure_consumer_group() -> None:
             raise
 
 
-async def worker_loop(pool: asyncpg.Pool) -> None:
+async def worker_loop(db: aiosqlite.Connection) -> None:
     await ensure_consumer_group()
     print("Analyser worker started. Waiting for jobs...")
 
@@ -150,20 +147,20 @@ async def worker_loop(pool: asyncpg.Pool) -> None:
                 envelope = json.loads(fields[b"data"])
                 try:
                     result = await analyse(envelope)
-                    await persist_and_cleanup(pool, envelope, result)
+                    await persist_and_cleanup(db, envelope, result)
                     r.xack(STREAM, GROUP, msg_id)
                 except Exception as e:
                     print(f"Job {envelope.get('job_id')} failed: {e}")
-                    await log_failure(pool, envelope.get("job_id"), str(e))
+                    await log_failure(db, envelope.get("job_id"), str(e))
                     # Left unacked intentionally — eligible for reclaim/retry.
 
 
 async def main() -> None:
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    try:
-        await worker_loop(pool)
-    finally:
-        await pool.close()
+    # SQLite + WAL mode gives reasonable concurrent read/write behavior for
+    # a single-writer worker alongside a read-only UI backend.
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await worker_loop(db)
 
 
 if __name__ == "__main__":

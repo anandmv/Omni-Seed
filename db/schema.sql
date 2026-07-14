@@ -1,45 +1,47 @@
--- OmniSeed database schema
+-- OmniSeed database schema (SQLite)
+--
 -- Design principle: raw payload content is never stored here, by design.
 -- The `jobs` table tracks lifecycle only; `analysis_results` holds the
 -- long-term metadata/summary output that the retention policy permits.
+--
+-- Notes on SQLite-specific choices vs. the original Postgres version:
+--   - No native UUID type -> stored as TEXT (generate with uuid4() in Python)
+--   - No TIMESTAMPTZ -> stored as TEXT in ISO 8601 (UTC), or use
+--     CURRENT_TIMESTAMP for DB-side defaults
+--   - No native array type -> `tags` stored as a JSON-encoded TEXT column
+--   - CHECK constraints work the same as Postgres
 
--- Tracks job lifecycle for auditing, never stores payload content
-CREATE TABLE jobs (
-    job_id UUID PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
     source_type TEXT NOT NULL CHECK (source_type IN ('iot', 'wearable', 'upload')),
     status TEXT NOT NULL CHECK (status IN ('received', 'processing', 'summarized', 'failed', 'raw_deleted')),
-    received_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ,
+    received_at TEXT NOT NULL,
+    completed_at TEXT,
     error_message TEXT
 );
 
--- The only long-term data store — metadata + summaries, no raw content
-CREATE TABLE analysis_results (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    job_id UUID NOT NULL REFERENCES jobs(job_id),
+CREATE TABLE IF NOT EXISTS analysis_results (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES jobs(job_id),
     source_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     summary TEXT NOT NULL,
-    tags TEXT[],
-    anomaly_flag BOOLEAN DEFAULT FALSE,
+    tags TEXT,               -- JSON-encoded array, e.g. '["temperature","spike"]'
+    anomaly_flag INTEGER NOT NULL DEFAULT 0 CHECK (anomaly_flag IN (0, 1)),
     prompt_version TEXT NOT NULL DEFAULT 'v1',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- Registry of known sources (devices, wearable accounts, upload channels).
--- The polling scheduler should read from this table in production instead
--- of hardcoding pollers.
-CREATE TABLE sources (
+CREATE TABLE IF NOT EXISTS sources (
     source_id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL,
     display_name TEXT,
     poll_endpoint TEXT,       -- null for push sources
-    poll_interval_minutes INT,
-    registered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    poll_interval_minutes INTEGER,
+    registered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- Useful indexes for the UI's browse/filter views
-CREATE INDEX idx_results_source_type ON analysis_results(source_type);
-CREATE INDEX idx_results_created_at ON analysis_results(created_at);
-CREATE INDEX idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_results_source_type ON analysis_results(source_type);
+CREATE INDEX IF NOT EXISTS idx_results_created_at ON analysis_results(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);

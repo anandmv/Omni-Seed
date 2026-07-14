@@ -2,7 +2,8 @@
 
 In-house data seed analyser: ingests fragmented data (IoT, wearables,
 uploads), analyses it with a locally hosted LLM (LM Studio + Phi), and
-stores only generated metadata/summaries long-term.
+stores only generated metadata/summaries long-term in a local SQLite
+database.
 
 See `PLAN.md` for the full architecture writeup.
 
@@ -11,7 +12,7 @@ See `PLAN.md` for the full architecture writeup.
 ```
 omniseed/
 ├── PLAN.md                    Full architecture & build plan
-├── requirements.txt            Python deps for collector + analyser
+├── pyproject.toml              Python deps for collector + analyser (uv-managed)
 ├── collector/
 │   ├── main.py                 FastAPI push endpoints (/ingest/*)
 │   └── poller.py                Polling collectors for pull-based sources
@@ -19,27 +20,60 @@ omniseed/
 │   ├── prompts.py                Per-source-type prompt builders
 │   └── worker.py                  Queue consumer, calls LM Studio, persists results
 ├── db/
-│   └── schema.sql                  Postgres schema (jobs, analysis_results, sources)
+│   └── schema.sql                  SQLite schema (jobs, analysis_results, sources)
 └── ui/
     ├── server/
     │   ├── package.json
+    │   ├── db.js                    SQLite connection (better-sqlite3)
     │   └── routes/export.js         Express CSV/JSON/PDF export route
     └── client/
         └── ExportPanel.jsx           React export controls
 ```
 
+## Why SQLite + uv
+
+- **SQLite** keeps the whole stack local with zero extra services to run —
+  no Postgres server, no separate DB credentials. WAL mode lets the
+  analyser worker (writer) and UI backend (reader) operate concurrently
+  without locking issues at this scale. If you later need multi-writer
+  concurrency or heavier query load, migrating to Postgres is
+  straightforward since the schema/queries are simple.
+- **uv** replaces pip + venv with a single fast tool — `uv run` creates and
+  manages the virtual environment automatically based on `pyproject.toml`,
+  no manual `venv` activation needed.
+
 ## Running locally (rough order)
 
-1. Start Postgres and Redis locally.
-2. Apply the schema: `psql omniseed < db/schema.sql`
+1. Create the SQLite database from the schema:
+   ```
+   sqlite3 omniseed.db < db/schema.sql
+   ```
+2. Start Redis locally (still used as the job queue between collector and
+   analyser — SQLite isn't a good fit for queue semantics).
 3. Start LM Studio in server mode with a Phi model loaded (listens on
    `localhost:1234` by default).
-4. Install Python deps: `pip install -r requirements.txt`
-5. Start the collector API: `uvicorn collector.main:app --reload --port 8000`
-6. Start the polling collectors: `python collector/poller.py`
-7. Start the analyser worker: `python analyser/worker.py`
-8. Install and start the Node UI server (`ui/server`), then the React
-   client, wiring `ExportPanel` into your results view.
+4. Install Python deps and run the collector API:
+   ```
+   uv run uvicorn collector.main:app --reload --port 8000
+   ```
+5. Start the polling collectors:
+   ```
+   uv run collector/poller.py
+   ```
+6. Start the analyser worker:
+   ```
+   uv run analyser/worker.py
+   ```
+7. Install and start the Node UI server:
+   ```
+   cd ui/server && npm install && node server.js
+   ```
+   (wire up your own `server.js`/Express app importing `routes/export.js`)
+8. Start the React client, using `ExportPanel` in your results view.
+
+By default, both the analyser worker and the UI server look for
+`omniseed.db` in the working directory — set `OMNISEED_DB_PATH` as an
+environment variable if you want it elsewhere.
 
 ## Notes
 
