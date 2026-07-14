@@ -98,11 +98,17 @@ def build_scheduler() -> AsyncIOScheduler:
     return scheduler
 
 
-if __name__ == "__main__":
+async def main() -> None:
     scheduler = build_scheduler()
     scheduler.start()
     print("Polling collectors started. Press Ctrl+C to exit.")
     try:
-        asyncio.get_event_loop().run_forever()
+        await asyncio.Event().wait()  # sleep forever, cleanly interruptible
     except (KeyboardInterrupt, SystemExit):
         pass
+    finally:
+        scheduler.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
