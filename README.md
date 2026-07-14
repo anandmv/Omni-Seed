@@ -2,8 +2,8 @@
 
 In-house data seed analyser: ingests fragmented data (IoT, wearables,
 uploads), analyses it with a locally hosted LLM (LM Studio + Phi), and
-stores only generated metadata/summaries long-term in a local SQLite
-database.
+stores only generated metadata/summaries long-term — all in a single
+local SQLite file, no extra services required.
 
 ![OmniSeed architecture](assets/omniseed_architecture.svg)
 
@@ -16,13 +16,13 @@ omniseed/
 ├── PLAN.md                    Full architecture & build plan
 ├── pyproject.toml              Python deps for collector + analyser (uv-managed)
 ├── collector/
-│   ├── main.py                 FastAPI push endpoints (/ingest/*)
-│   └── poller.py                Polling collectors for pull-based sources
+│   ├── main.py                 FastAPI push endpoints (/ingest/*), writes jobs to SQLite
+│   └── poller.py                Polling collectors for pull-based sources, same DB writes
 ├── analyser/
 │   ├── prompts.py                Per-source-type prompt builders
-│   └── worker.py                  Queue consumer, calls LM Studio, persists results
+│   └── worker.py                  Polls jobs table, calls LM Studio, persists results
 ├── db/
-│   └── schema.sql                  SQLite schema (jobs, analysis_results, sources)
+│   └── schema.sql                  SQLite schema — `jobs` doubles as the work queue
 └── ui/
     ├── server/
     │   ├── package.json
@@ -32,17 +32,28 @@ omniseed/
         └── ExportPanel.jsx           React export controls
 ```
 
-## Why SQLite + uv
+## Why no message broker
 
-- **SQLite** keeps the whole stack local with zero extra services to run —
-  no Postgres server, no separate DB credentials. WAL mode lets the
-  analyser worker (writer) and UI backend (reader) operate concurrently
-  without locking issues at this scale. If you later need multi-writer
-  concurrency or heavier query load, migrating to Postgres is
-  straightforward since the schema/queries are simple.
-- **uv** replaces pip + venv with a single fast tool — `uv run` creates and
-  manages the virtual environment automatically based on `pyproject.toml`,
-  no manual `venv` activation needed.
+The `jobs` table serves double duty as both the lifecycle/audit log and
+the work queue:
+
+- Collector processes (`main.py`, `poller.py`) insert a row with
+  `status='received'` and the full ingestion envelope in `envelope_json`.
+- The analyser worker polls for the oldest `received` row and claims it
+  with an atomic `UPDATE ... WHERE status='received'` — the affected-row
+  count tells it whether it won the claim, so multiple workers can run
+  safely without double-processing a job.
+- If a worker crashes mid-job, `reclaim_stale_jobs()` resets anything
+  stuck in `processing` past a timeout back to `received` so another
+  worker retries it — the same crash-safety a broker would give you,
+  without running one.
+
+This trades a small amount of polling latency (checked every couple of
+seconds) for one less service to install, run, and monitor. If you later
+need pub/sub fan-out, priority queues, or very high throughput, that's the
+point to introduce a real broker — the schema and worker logic here are
+intentionally simple so that migration wouldn't require touching the
+collector or LLM logic.
 
 ## Running locally (recommended)
 
@@ -69,34 +80,34 @@ Commands:
 
 Manual steps (if you prefer them):
 
+## Running locally (rough order)
+
 1. Create the SQLite database from the schema:
-   ```bash
+   ```
    sqlite3 omniseed.db < db/schema.sql
    ```
-2. Start Redis locally (still used as the job queue between collector and
-   analyser — SQLite isn't a good fit for queue semantics).
-3. Start LM Studio in server mode with a Phi model loaded (listens on
+2. Start LM Studio in server mode with a Phi model loaded (listens on
    `localhost:1234` by default).
-4. Install Python deps and run the collector API:
-   ```bash
+3. Install Python deps and run the collector API:
+   ```
    uv run uvicorn collector.main:app --reload --port 8000
    ```
-5. Start the polling collectors:
-   ```bash
-   uv run python collector/poller.py
+4. Start the polling collectors:
    ```
-6. Start the analyser worker:
-   ```bash
-   uv run python analyser/worker.py
+   uv run collector/poller.py
    ```
-7. Install and start the Node UI server:
-   ```bash
-   cd ui/server && yarn install && node server.js
+5. Start the analyser worker:
+   ```
+   uv run analyser/worker.py
+   ```
+6. Install and start the Node UI server:
+   ```
+   cd ui/server && npm install && node server.js
    ```
    (wire up your own `server.js`/Express app importing `routes/export.js`)
-8. Start the React client, using `ExportPanel` in your results view.
+7. Start the React client, using `ExportPanel` in your results view.
 
-By default, both the analyser worker and the UI server look for
+By default, the collector, poller, worker, and UI server all look for
 `omniseed.db` in the working directory — set `OMNISEED_DB_PATH` as an
 environment variable if you want it elsewhere.
 

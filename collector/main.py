@@ -4,9 +4,11 @@ OmniSeed Collector — REST API listener
 Handles push-based ingestion from sources that can call us directly:
 mobile/wearable companion apps, IoT gateways, and user-initiated uploads.
 
-Run with: uvicorn main:app --reload --port 8000
-Requires LM Studio worker (see analyser/worker.py) and a Redis instance
-for the job queue.
+Jobs are written straight into the SQLite `jobs` table with status
+'received' — this table doubles as the work queue, so there's no separate
+broker to run. The analyser worker polls for 'received' rows.
+
+Run with: uv run uvicorn collector.main:app --reload --port 8000
 """
 
 import json
@@ -14,15 +16,13 @@ import os
 import time
 import uuid
 
-import redis
+import aiosqlite
 from fastapi import BackgroundTasks, FastAPI, UploadFile
 from pydantic import BaseModel
 
 app = FastAPI(title="OmniSeed Collector")
 
-r = redis.Redis()
-STREAM = "omniseed:jobs"
-
+DB_PATH = os.environ.get("OMNISEED_DB_PATH", "omniseed.db")
 SCRATCH_DIR = "/tmp/omniseed"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB safety cap
 
@@ -32,9 +32,24 @@ class SensorPayload(BaseModel):
     payload: dict  # deliberately loose — shape varies by device/vendor
 
 
-def enqueue(envelope: dict) -> None:
-    """Push an envelope onto the shared job queue for the analyser worker."""
-    r.xadd(STREAM, {"data": json.dumps(envelope)})
+async def enqueue(envelope: dict) -> None:
+    """Insert a job row with status='received'. The analyser worker polls
+    for these; no message broker involved."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO jobs (job_id, source_id, source_type, status, envelope_json, received_at)
+            VALUES (?, ?, ?, 'received', ?, ?)
+            """,
+            (
+                envelope["job_id"],
+                envelope["source_id"],
+                envelope["source_type"],
+                json.dumps(envelope),
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(envelope["received_at"])),
+            ),
+        )
+        await db.commit()
 
 
 @app.post("/ingest/sensor")
