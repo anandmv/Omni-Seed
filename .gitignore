@@ -224,6 +224,7 @@ out/
 
 # SQLite database files
 omniseed.db
+*.db-*
 
 # Static React build output
 build/
