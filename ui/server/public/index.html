@@ -1053,6 +1053,42 @@
         `;
       }
 
+      let analysisBlock = '';
+      if (job.summary || job.tags?.length || job.measurements && Object.keys(job.measurements).length || job.system_fingerprint || job.anomaly_flag) {
+        const tags = Array.isArray(job.tags) && job.tags.length ? job.tags.map(tag => `<span class="tag-source" style="margin-right:0.35rem;">${escapeHtml(tag)}</span>`).join('') : '—';
+        const measurements = job.measurements && Object.keys(job.measurements).length
+          ? `<div class="detail-value" style="font-family:'JetBrains Mono'; white-space:pre-wrap;">${escapeHtml(JSON.stringify(job.measurements, null, 2))}</div>`
+          : '—';
+        const fingerprint = job.system_fingerprint ? `<div class="detail-value" style="font-family:'JetBrains Mono';">${escapeHtml(job.system_fingerprint)}</div>` : '—';
+        const anomaly = job.anomaly_flag ? '<span class="badge badge-failed">anomaly</span>' : 'None';
+
+        analysisBlock = `
+          <div style="margin-top: 1rem;">
+            <div class="detail-label">Analysis Output</div>
+            <div class="detail-row">
+              <div class="detail-label">Summary</div>
+              <div class="detail-value">${escapeHtml(job.summary || '—')}</div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-label">Tags</div>
+              <div class="detail-value">${tags}</div>
+            </div>
+            <div class="detail-row">
+              <div class="detail-label">Measurements</div>
+              ${measurements}
+            </div>
+            <div class="detail-row">
+              <div class="detail-label">Fingerprint</div>
+              ${fingerprint}
+            </div>
+            <div class="detail-row">
+              <div class="detail-label">Anomaly</div>
+              <div class="detail-value">${anomaly}</div>
+            </div>
+          </div>
+        `;
+      }
+
       // Configure retry button
       if (job.status === 'failed') {
         retryBtn.style.display = 'block';
@@ -1088,6 +1124,7 @@
           <div class="detail-value" style="font-family: 'JetBrains Mono';">${job.locked_by || '—'}</div>
         </div>
         ${errorBlock}
+        ${analysisBlock}
       `;
 
       modal.classList.add('active');

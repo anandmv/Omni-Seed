@@ -24,6 +24,7 @@ import shutil
 import socket
 import time
 import uuid
+from typing import Any
 
 import aiosqlite
 import httpx
@@ -43,6 +44,8 @@ class AnalysisResult(BaseModel):
     tags: list[str]
     summary: str
     anomaly_flag: bool
+    measurements: dict[str, Any] | None = None
+    system_fingerprint: str | None = None
 
 
 def now_iso() -> str:
@@ -86,7 +89,7 @@ async def claim_next_job(db: aiosqlite.Connection) -> tuple[str, dict] | None:
     return job_id, json.loads(envelope_json)
 
 
-async def call_lm_studio(prompt: str) -> str:
+async def call_lm_studio(prompt: str) -> tuple[str, str | None]:
     schema = {
         "type": "object",
         "properties": {
@@ -102,6 +105,14 @@ async def call_lm_studio(prompt: str) -> str:
             "anomaly_flag": {
                 "type": "boolean",
                 "description": "Whether an anomaly was detected"
+            },
+            "measurements": {
+                "type": "object",
+                "description": "Extracted numeric or measurable values"
+            },
+            "system_fingerprint": {
+                "type": "string",
+                "description": "Stable fingerprint if one can be inferred"
             }
         },
         "required": ["tags", "summary", "anomaly_flag"]
@@ -141,28 +152,82 @@ async def call_lm_studio(prompt: str) -> str:
 
         data = resp.json()
         try:
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            fingerprint = data.get("system_fingerprint")
+            return content, fingerprint
         except (KeyError, TypeError, IndexError) as e:
             raise RuntimeError(
                 f"Unexpected LM Studio response shape: {json.dumps(data)}"
             ) from e
 
 
+def parse_analysis_response(raw: str, fallback_system_fingerprint: str | None = None) -> AnalysisResult:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("LM Studio response was not valid JSON") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("LM Studio response was not a JSON object")
+
+    measurements = payload.get("measurements")
+    if measurements is not None and not isinstance(measurements, dict):
+        raise ValueError("measurements must be an object when provided")
+
+    system_fingerprint = payload.get("system_fingerprint") or fallback_system_fingerprint
+    payload = {
+        "tags": payload.get("tags", []),
+        "summary": payload.get("summary", ""),
+        "anomaly_flag": payload.get("anomaly_flag", False),
+        "measurements": measurements,
+        "system_fingerprint": system_fingerprint,
+    }
+    return AnalysisResult.model_validate(payload)
+
+
 async def analyse(envelope: dict) -> AnalysisResult:
     prompt = build_prompt(envelope)
-    raw = await call_lm_studio(prompt)
+    raw, fingerprint = await call_lm_studio(prompt)
 
     try:
-        return AnalysisResult.model_validate_json(raw)
-    except ValidationError:
+        return parse_analysis_response(raw, fingerprint)
+    except (ValidationError, ValueError):
         # One corrective retry: tell the model exactly what went wrong.
         correction_prompt = (
             prompt
             + f"\n\nYour previous response was not valid JSON matching the schema: {raw}\n"
             + "Please respond again with ONLY valid JSON matching the schema."
         )
-        raw_retry = await call_lm_studio(correction_prompt)
-        return AnalysisResult.model_validate_json(raw_retry)  # let this raise if it still fails
+        raw_retry, retry_fingerprint = await call_lm_studio(correction_prompt)
+        return parse_analysis_response(raw_retry, retry_fingerprint or fingerprint)
+
+
+async def ensure_schema(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analysis_results (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(job_id),
+            source_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            tags TEXT,
+            anomaly_flag INTEGER NOT NULL DEFAULT 0 CHECK (anomaly_flag IN (0, 1)),
+            prompt_version TEXT NOT NULL DEFAULT 'v2',
+            measurements TEXT,
+            system_fingerprint TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        """
+    )
+    await db.commit()
+
+    columns = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(analysis_results)")}
+    if "measurements" not in columns:
+        await db.execute("ALTER TABLE analysis_results ADD COLUMN measurements TEXT")
+    if "system_fingerprint" not in columns:
+        await db.execute("ALTER TABLE analysis_results ADD COLUMN system_fingerprint TEXT")
+    await db.commit()
 
 
 async def persist_and_cleanup(db: aiosqlite.Connection, job_id: str, envelope: dict, result: AnalysisResult) -> None:
@@ -173,8 +238,8 @@ async def persist_and_cleanup(db: aiosqlite.Connection, job_id: str, envelope: d
     await db.execute(
         """
         INSERT INTO analysis_results
-            (id, job_id, source_id, source_type, summary, tags, anomaly_flag, prompt_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, job_id, source_id, source_type, summary, tags, anomaly_flag, prompt_version, measurements, system_fingerprint)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
@@ -185,6 +250,8 @@ async def persist_and_cleanup(db: aiosqlite.Connection, job_id: str, envelope: d
             json.dumps(result.tags),
             1 if result.anomaly_flag else 0,
             PROMPT_VERSION,
+            json.dumps(result.measurements or {}),
+            result.system_fingerprint,
         ),
     )
     await db.execute(
@@ -237,6 +304,7 @@ async def main() -> None:
     # operate concurrently without locking issues at this scale.
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
+        await ensure_schema(db)
         await worker_loop(db)
 
 

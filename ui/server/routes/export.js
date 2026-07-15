@@ -19,7 +19,7 @@ router.get('/export/:format', (req, res) => {
 
   const rows = db
     .prepare(
-      `SELECT source_id, source_type, summary, tags, anomaly_flag, created_at
+      `SELECT source_id, source_type, summary, tags, anomaly_flag, measurements, system_fingerprint, created_at
        FROM analysis_results
        WHERE (@source_type IS NULL OR source_type = @source_type)
          AND (@from IS NULL OR created_at >= @from)
@@ -31,7 +31,11 @@ router.get('/export/:format', (req, res) => {
       from: from || null,
       to: to || null,
     })
-    .map((row) => ({ ...row, tags: JSON.parse(row.tags || '[]') }));
+    .map((row) => ({
+      ...row,
+      tags: JSON.parse(row.tags || '[]'),
+      measurements: JSON.parse(row.measurements || '{}'),
+    }));
 
   switch (format) {
     case 'json':
@@ -39,7 +43,7 @@ router.get('/export/:format', (req, res) => {
 
     case 'csv': {
       const parser = new CsvParser({
-        fields: ['source_id', 'source_type', 'summary', 'tags', 'anomaly_flag', 'created_at'],
+        fields: ['source_id', 'source_type', 'summary', 'tags', 'anomaly_flag', 'measurements', 'system_fingerprint', 'created_at'],
       });
       res.header('Content-Type', 'text/csv');
       res.attachment('omniseed-export.csv');
@@ -56,6 +60,12 @@ router.get('/export/:format', (req, res) => {
       rows.forEach((row) => {
         doc.fontSize(11).text(`${row.created_at} — ${row.source_type} (${row.source_id})`);
         doc.fontSize(10).fillColor('gray').text(row.summary);
+        if (row.measurements && Object.keys(row.measurements).length) {
+          doc.fillColor('black').text(`Measurements: ${JSON.stringify(row.measurements)}`);
+        }
+        if (row.system_fingerprint) {
+          doc.fillColor('blue').text(`Fingerprint: ${row.system_fingerprint}`);
+        }
         if (row.anomaly_flag) doc.fillColor('red').text('Anomaly flagged');
         doc.fillColor('black').moveDown();
       });

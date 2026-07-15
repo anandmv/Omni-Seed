@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS analysis_results (
     summary TEXT NOT NULL,
     tags TEXT,               -- JSON-encoded array, e.g. '["temperature","spike"]'
     anomaly_flag INTEGER NOT NULL DEFAULT 0 CHECK (anomaly_flag IN (0, 1)),
-    prompt_version TEXT NOT NULL DEFAULT 'v1',
+    prompt_version TEXT NOT NULL DEFAULT 'v2',
+    measurements TEXT,
+    system_fingerprint TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
