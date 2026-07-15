@@ -47,34 +47,46 @@ async def enqueue(envelope: dict) -> None:
 async def poll_wearable_api(source_id: str, endpoint: str, api_token: str) -> None:
     """Generic wearable vendor poller. Fetches latest data and enqueues it
     wrapped in the standard envelope."""
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(endpoint, headers={"Authorization": f"Bearer {api_token}"})
-        resp.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(endpoint, headers={"Authorization": f"Bearer {api_token}"})
+            resp.raise_for_status()
+            payload = resp.json()
 
         envelope = {
             "job_id": str(uuid.uuid4()),
             "source_type": "wearable",
             "source_id": source_id,
             "received_at": time.time(),
-            "raw_payload": resp.json(),
+            "raw_payload": payload,
         }
         await enqueue(envelope)
+    except httpx.HTTPError as e:
+        print(f"Poll error for {source_id} at {endpoint}: {e}")
+    except Exception as e:
+        print(f"Unexpected error polling {source_id}: {e}")
 
 
 async def poll_iot_platform(source_id: str, endpoint: str, api_key: str) -> None:
     """Example poller for an IoT platform that requires fetch rather than push."""
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(endpoint, params={"api_key": api_key})
-        resp.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(endpoint, params={"api_key": api_key})
+            resp.raise_for_status()
+            payload = resp.json()
 
         envelope = {
             "job_id": str(uuid.uuid4()),
             "source_type": "iot",
             "source_id": source_id,
             "received_at": time.time(),
-            "raw_payload": resp.json(),
+            "raw_payload": payload,
         }
         await enqueue(envelope)
+    except httpx.HTTPError as e:
+        print(f"Poll error for {source_id} at {endpoint}: {e}")
+    except Exception as e:
+        print(f"Unexpected error polling {source_id}: {e}")
 
 
 def build_scheduler() -> AsyncIOScheduler:
