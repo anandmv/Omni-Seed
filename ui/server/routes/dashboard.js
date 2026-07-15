@@ -57,15 +57,23 @@ router.get('/queue/stats', (req, res) => {
         locked_seconds: row.locked_seconds ? Math.round(row.locked_seconds) : 0,
       }));
 
-    // 5. Get recent 50 jobs
+    // 5. Get recent 50 jobs with any attached analysis detail
     const recentJobs = db
       .prepare(
-        `SELECT job_id, source_id, source_type, status, received_at, completed_at, error_message, locked_by
-         FROM jobs
-         ORDER BY received_at DESC
+        `SELECT j.job_id, j.source_id, j.source_type, j.status, j.received_at, j.completed_at,
+                j.error_message, j.locked_by, a.summary, a.tags, a.anomaly_flag,
+                a.measurements, a.system_fingerprint
+         FROM jobs j
+         LEFT JOIN analysis_results a ON a.job_id = j.job_id
+         ORDER BY j.received_at DESC
          LIMIT 50`
       )
-      .all();
+      .all()
+      .map((row) => ({
+        ...row,
+        tags: row.tags ? JSON.parse(row.tags) : [],
+        measurements: row.measurements ? JSON.parse(row.measurements) : {},
+      }));
 
     return res.json({
       stats,
