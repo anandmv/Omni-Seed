@@ -3,6 +3,16 @@
 This document describes a local testing workflow for OmniSeed using sample data.
 It follows the same path as the normal workflow: ingest → analyse → persist → export.
 
+## Prerequisites
+
+### LM Studio (required for analysis)
+
+The analyser worker requires LM Studio running locally on `localhost:1234`:
+
+1. Download [LM Studio](https://lmstudio.ai/)
+2. Open it and load the Phi model (or any OpenAI-compatible model)
+3. Start the server on `localhost:1234`
+
 ## 1. Start the stack
 
 From the repository root:
@@ -134,5 +144,6 @@ Stop the services when done:
 ## 8. Notes
 
 - The collector uses `OMNISEED_DB_PATH` if set to point at a different SQLite file.
-- If LM Studio is not running locally on `localhost:1234`, the analyser worker will fail.
+- **LM Studio** must be running on `localhost:1234` for analysis.
+- If LM Studio is unavailable, the analyser worker will log connection errors and retry jobs.
 - The upload endpoint stores temp files under `/tmp/omniseed/{job_id}` and removes them after successful analysis.

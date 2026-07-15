@@ -87,20 +87,65 @@ async def claim_next_job(db: aiosqlite.Connection) -> tuple[str, dict] | None:
 
 
 async def call_lm_studio(prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            LM_STUDIO_URL,
-            json={
-                "model": "phi-3.5",
-                "messages": [
-                    {"role": "system", "content": "You are a precise data analysis assistant."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Relevant tags or categories"
             },
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+            "summary": {
+                "type": "string",
+                "description": "Concise summary of the analysis"
+            },
+            "anomaly_flag": {
+                "type": "boolean",
+                "description": "Whether an anomaly was detected"
+            }
+        },
+        "required": ["tags", "summary", "anomaly_flag"]
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            resp = await client.post(
+                LM_STUDIO_URL,
+                json={
+                    "model": "phi-3.5",
+                    "messages": [
+                        {"role": "system", "content": "You are a precise data analysis assistant."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "AnalysisResult",
+                            "schema": schema,
+                            "strict": True
+                        }
+                    }
+                },
+            )
+            resp.raise_for_status()
+        except httpx.ConnectError as e:
+            raise RuntimeError(
+                f"Cannot connect to LM Studio at {LM_STUDIO_URL}. Start LM Studio and retry."
+            ) from e
+        except httpx.HTTPStatusError as e:
+            body = e.response.text
+            raise RuntimeError(
+                f"LM Studio rejected the request with status {e.response.status_code}: {body.strip()}"
+            ) from e
+
+        data = resp.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, TypeError, IndexError) as e:
+            raise RuntimeError(
+                f"Unexpected LM Studio response shape: {json.dumps(data)}"
+            ) from e
 
 
 async def analyse(envelope: dict) -> AnalysisResult:
