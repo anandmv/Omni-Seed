@@ -42,14 +42,25 @@ CREATE TABLE IF NOT EXISTS analysis_results (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- Pluggable polling sources. The poller loads enabled rows at startup.
 CREATE TABLE IF NOT EXISTS sources (
-    source_id TEXT PRIMARY KEY,
-    source_type TEXT NOT NULL,
-    display_name TEXT,
-    poll_endpoint TEXT,       -- null for push sources
-    poll_interval_minutes INTEGER,
-    registered_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    source_id    TEXT PRIMARY KEY,          -- unique name, e.g. "fitbit-user-123"
+    source_type  TEXT NOT NULL              -- 'wearable' | 'iot'
+        CHECK (source_type IN ('wearable', 'iot')),
+    endpoint     TEXT NOT NULL,             -- URL to poll
+    auth_header  TEXT,                      -- e.g. "Bearer TOKEN"
+    auth_param   TEXT,                      -- e.g. query param API key
+    poll_minutes INTEGER NOT NULL DEFAULT 15,
+    enabled      INTEGER NOT NULL DEFAULT 1
+        CHECK (enabled IN (0, 1)),
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- Example seed rows (disabled by default — set enabled=1 to activate)
+INSERT OR IGNORE INTO sources (source_id, source_type, endpoint, auth_header, poll_minutes, enabled)
+VALUES
+    ('fitbit-user-123',    'wearable', 'https://api.fitbit.example/v1/activity', 'Bearer TOKEN_HERE', 15, 0),
+    ('greenhouse-sensor-01', 'iot',    'https://iot-platform.example/api/latest', NULL, 5, 0);
 
 -- The core queue-lookup index: workers scan for the oldest pending job.
 CREATE INDEX IF NOT EXISTS idx_jobs_status_received ON jobs(status, received_at);
